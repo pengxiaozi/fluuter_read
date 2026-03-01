@@ -130,8 +130,11 @@ class BuiltInDictionaries {
       for (final t in trans) {
         if (t is Map<String, dynamic>) {
           final tranCn = t['tranCn'] as String?;
+          final pos = t['pos'] as String?;
           if (tranCn != null && tranCn.isNotEmpty) {
-            definitions.add(tranCn);
+            // 如果有 pos 字段，将其添加到释义前面
+            final definition = pos != null && pos.isNotEmpty ? '$pos. $tranCn' : tranCn;
+            definitions.add(definition);
           }
         }
       }
@@ -172,14 +175,14 @@ class BuiltInDictionaries {
       final rels = relWordData?['rels'] as List<dynamic>? ?? [];
       for (final r in rels) {
         if (r is Map<String, dynamic>) {
-          final pos = r['pos'] as String?;
           final words = r['words'] as List<dynamic>? ?? [];
           for (final w in words) {
             if (w is Map<String, dynamic>) {
               final hwd = w['hwd'] as String?;
               final tran = w['tran'] as String?;
               if (hwd != null) {
-                final related = '$pos. $hwd${tran != null ? " $tran" : ""}';
+                // 不显示 pos，只显示单词和释义
+                final related = '$hwd${tran != null ? " $tran" : ""}';
                 relatedDetails.add(related);
               }
             }
@@ -193,12 +196,12 @@ class BuiltInDictionaries {
       final synos = synoData?['synos'] as List<dynamic>? ?? [];
       for (final syn in synos) {
         if (syn is Map<String, dynamic>) {
-          final pos = syn['pos'] as String?;
           final tran = syn['tran'] as String?;
           final hwds = syn['hwds'] as List<dynamic>? ?? [];
           if (tran != null) {
-            final synonymWords = hwds.where((h) => h is Map<String, dynamic>).map((h) => (h as Map<String, dynamic>)['w'] as String).join(', ');
-            synonymDetails.add('$pos. $tran: $synonymWords');
+            final synonymWords = hwds.whereType<Map<String, dynamic>>().map((h) => h['w'] as String).join(', ');
+            // 不显示 pos，只显示释义和单词
+            synonymDetails.add('$tran: $synonymWords');
           }
         }
       }

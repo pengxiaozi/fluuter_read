@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
@@ -17,12 +19,15 @@ class PracticeScreen extends ConsumerStatefulWidget {
 
 class _PracticeScreenState extends ConsumerState<PracticeScreen>
     with SingleTickerProviderStateMixin {
-  final _controller = TextEditingController();
-  final _focusNode = FocusNode();
+  TextEditingController? _controller;
   final FlutterTts _flutterTts = FlutterTts();
   String? _lastWordId;
   bool _initialized = false;
   TabController? _tabController;
+  Timer? _focusTimer;
+  
+  // Web 平台专用：使用 FocusKey 来管理焦点
+  final GlobalKey _inputKey = GlobalKey();
 
   @override
   void initState() {
@@ -31,21 +36,59 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen>
     _delayedInit();
   }
 
+  void _createInputController() {
+    _controller?.dispose();
+    _focusTimer?.cancel();
+    _controller = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _controller?.dispose();
+    _tabController?.dispose();
+    _flutterTts.stop();
+    _focusTimer?.cancel();
+    super.dispose();
+  }
+
   void _delayedInit() {
     SchedulerBinding.instance.addPostFrameCallback((_) async {
       if (mounted && !_initialized) {
         _initialized = true;
         final notifier = ref.read(practiceProvider.notifier);
         await notifier.initialize();
-        // 初始化 TabController
+        _createInputController();
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) {
             _initTabController();
           }
         });
-        // Web 平台：使用自动聚焦，不手动调用 requestFocus
-        if (!kIsWeb) {
-          _focusNode.requestFocus();
+      }
+    });
+  }
+
+  void _tryRequestFocus() {
+    if (!mounted) return;
+    _focusTimer?.cancel();
+
+    // Web 平台下使用 FocusScope 聚焦，通过 GlobalKey 获取 RenderBox
+    if (kIsWeb) {
+      _focusTimer = Timer(const Duration(milliseconds: 200), () {
+        if (!mounted) return;
+        final context = _inputKey.currentContext;
+        if (context != null) {
+          FocusScope.of(context).requestFocus();
+        }
+      });
+      return;
+    }
+
+    // 非 Web 平台正常聚焦
+    _focusTimer = Timer(const Duration(milliseconds: 100), () {
+      if (mounted) {
+        final context = _inputKey.currentContext;
+        if (context != null) {
+          FocusScope.of(context).requestFocus();
         }
       }
     });
@@ -69,15 +112,6 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen>
   }
 
   @override
-  void dispose() {
-    _controller.dispose();
-    _focusNode.dispose();
-    _tabController?.dispose();
-    _flutterTts.stop();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     final practiceState = ref.watch(practiceProvider);
     final settings = ref.watch(settingsProvider);
@@ -85,31 +119,27 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen>
 
     final word = practiceState.currentWord;
 
-    // 监听单词变化
     if (_initialized) {
       ref.listen<Word?>(
         practiceProvider.select((state) => state.currentWord),
         (previous, next) {
           if (next != null && _lastWordId != next.id) {
             _lastWordId = next.id;
-            _controller.clear();
-            // 重置 Tab 索引
+            _createInputController();
             WidgetsBinding.instance.addPostFrameCallback((_) {
               if (mounted && _tabController != null) {
                 _tabController!.index = 0;
               }
-              // Web 平台：不手动聚焦，依赖 autofoucs
-              if (!kIsWeb) {
-                _focusNode.requestFocus();
-              }
               _speak(next.term);
+              SchedulerBinding.instance.addPostFrameCallback((_) {
+                _tryRequestFocus();
+              });
             });
           }
         },
       );
     }
 
-    // 监听是否正确回答，正确时播放音频
     ref.listen<bool?>(
       practiceProvider.select((state) => state.shouldPlayAudio),
       (previous, next) {
@@ -128,6 +158,24 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen>
       appBar: AppBar(
         title: const Text('肌肉记忆练习'),
         actions: [
+          if (word != null)
+            IconButton(
+              onPressed: () {
+                print('=== 当前单词数据 ===');
+                print('term: ${word.term}');
+                print('definitions: ${word.definitions}');
+                print('examples: ${word.examples}');
+                print('===================');
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('例句数：${word.examples.length}, 短语数：${word.phraseDetails.length}'),
+                    duration: const Duration(seconds: 2),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.bug_report),
+              tooltip: '查看数据',
+            ),
           IconButton(
             onPressed: word == null ? null : () => notifier.skipToNext(),
             icon: const Icon(Icons.skip_next),
@@ -146,7 +194,6 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen>
               )
             : Column(
                 children: [
-                  // 顶部统计和提示
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -176,7 +223,6 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen>
                       ),
                     ],
                   ),
-                  // 反馈提示（顶部小字）
                   if (practiceState.feedbackMessage != null && practiceState.lastIsCorrect != null)
                     Container(
                       margin: const EdgeInsets.only(top: 8),
@@ -197,7 +243,6 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen>
                       ),
                     ),
                   const SizedBox(height: 16),
-                  // 单词卡片
                   Expanded(
                     child: SingleChildScrollView(
                       child: Card(
@@ -206,7 +251,6 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen>
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
-                              // 导航按钮
                               Row(
                                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                 children: [
@@ -227,7 +271,6 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen>
                                 ],
                               ),
                               const SizedBox(height: 16),
-                              // 单词和发音
                               Row(
                                 mainAxisAlignment: MainAxisAlignment.center,
                                 crossAxisAlignment: CrossAxisAlignment.center,
@@ -266,62 +309,71 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen>
                                 ],
                               ),
                               const SizedBox(height: 12),
-                              // 输入框
-                              TextField(
-                                key: ValueKey('input_${word.id}'),
-                                controller: _controller,
-                                focusNode: _focusNode,
-                                textAlign: TextAlign.center,
-                                // Web 平台使用 autofocus，避免手动焦点管理
-                                autofocus: kIsWeb,
-                                // Web 平台禁用选择功能，避免 DOM 焦点问题
-                                enableInteractiveSelection: !kIsWeb,
-                                style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                                      letterSpacing: 6,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                textInputAction: TextInputAction.done,
-                                onSubmitted: (value) {
-                                  if (value.isEmpty) return;
-                                  notifier.submitAnswer(value);
-                                  _controller.clear();
+                              // 输入框 - 使用 Focus 包装
+                              Focus(
+                                onFocusChange: (hasFocus) {
+                                  // Web 平台下，聚焦时确保输入框可用
+                                  if (kIsWeb && hasFocus) {
+                                    SchedulerBinding.instance.addPostFrameCallback((_) {
+                                      _controller?.selection = TextSelection.collapsed(
+                                        offset: _controller?.text.length ?? 0,
+                                      );
+                                    });
+                                  }
                                 },
-                                decoration: InputDecoration(
-                                  hintText: '_' * word.term.length,
-                                  hintStyle: Theme.of(context)
-                                      .textTheme
-                                      .titleLarge
-                                      ?.copyWith(
+                                child: TextField(
+                                  key: _inputKey,
+                                  controller: _controller,
+                                  textAlign: TextAlign.center,
+                                  enableInteractiveSelection: true,
+                                  keyboardType: TextInputType.text,
+                                  autofocus: false,
+                                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
                                         letterSpacing: 6,
-                                        color: const Color(0xFF8E8E93),
+                                        fontWeight: FontWeight.w600,
                                       ),
-                                  border: OutlineInputBorder(
-                                    borderRadius: BorderRadius.circular(12),
-                                    borderSide: const BorderSide(
-                                      color: Color(0xFFE5E5EA),
+                                  textInputAction: TextInputAction.done,
+                                  onSubmitted: (value) {
+                                    if (value.isEmpty) return;
+                                    notifier.submitAnswer(value);
+                                    _controller?.clear();
+                                  },
+                                  decoration: InputDecoration(
+                                    hintText: kIsWeb ? '点击输入框开始输入' : '_' * word.term.length,
+                                    hintStyle: Theme.of(context)
+                                        .textTheme
+                                        .titleLarge
+                                        ?.copyWith(
+                                          letterSpacing: 6,
+                                          color: const Color(0xFF8E8E93),
+                                        ),
+                                    border: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                      borderSide: const BorderSide(
+                                        color: Color(0xFFE5E5EA),
+                                      ),
                                     ),
-                                  ),
-                                  enabledBorder: OutlineInputBorder(
-                                    borderRadius: BorderRadius.circular(12),
-                                    borderSide: const BorderSide(
-                                      color: Color(0xFFE5E5EA),
+                                    enabledBorder: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                      borderSide: const BorderSide(
+                                        color: Color(0xFFE5E5EA),
+                                      ),
                                     ),
-                                  ),
-                                  focusedBorder: OutlineInputBorder(
-                                    borderRadius: BorderRadius.circular(12),
-                                    borderSide: const BorderSide(
-                                      color: Color(0xFF007AFF),
-                                      width: 1.5,
+                                    focusedBorder: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                      borderSide: const BorderSide(
+                                        color: Color(0xFF007AFF),
+                                        width: 1.5,
+                                      ),
                                     ),
-                                  ),
-                                  contentPadding: const EdgeInsets.symmetric(
-                                    horizontal: 16,
-                                    vertical: 12,
+                                    contentPadding: const EdgeInsets.symmetric(
+                                      horizontal: 16,
+                                      vertical: 12,
+                                    ),
                                   ),
                                 ),
                               ),
                               const SizedBox(height: 16),
-                              // 音标
                               if (settings.showPhonetic && word.phonetic != null)
                                 Center(
                                   child: Text(
@@ -336,7 +388,6 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen>
                                 ),
                               if (settings.showPhonetic && word.phonetic != null)
                                 const SizedBox(height: 8),
-                              // 释义
                               if (settings.showDefinition && word.definitions.isNotEmpty)
                                 Text(
                                   word.definitions.first,
@@ -367,10 +418,8 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen>
                                   ),
                                 ),
                               const SizedBox(height: 16),
-                              // 单词详情卡片（Tab 切换）
                               _buildWordDetailsTabCard(context, word),
                               const SizedBox(height: 12),
-                              // 清除和确认按钮
                               Row(
                                 mainAxisAlignment: MainAxisAlignment.end,
                                 children: [
@@ -378,11 +427,10 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen>
                                     context,
                                     icon: Icons.clear_rounded,
                                     onTap: () {
-                                      _controller.clear();
-                                      // Web 平台不手动聚焦，依赖 autofoucs
-                                      if (!kIsWeb) {
-                                        _focusNode.requestFocus();
-                                      }
+                                      _controller?.clear();
+                                      SchedulerBinding.instance.addPostFrameCallback((_) {
+                                        _tryRequestFocus();
+                                      });
                                     },
                                   ),
                                   const SizedBox(width: 8),
@@ -391,10 +439,10 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen>
                                     icon: Icons.check_rounded,
                                     filled: true,
                                     onTap: () {
-                                      final value = _controller.text;
+                                      final value = _controller?.text ?? '';
                                       if (value.isEmpty) return;
                                       notifier.submitAnswer(value);
-                                      _controller.clear();
+                                      _controller?.clear();
                                     },
                                   ),
                                 ],
@@ -411,19 +459,16 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen>
     );
   }
 
-  /// 构建单词详情 Tab 卡片
   Widget _buildWordDetailsTabCard(BuildContext context, Word word) {
     final hasExamples = word.examples.isNotEmpty;
     final hasSynonyms = word.synonymDetails.isNotEmpty;
     final hasPhrases = word.phraseDetails.isNotEmpty;
     final hasRelated = word.relatedDetails.isNotEmpty;
 
-    // 如果没有任何扩展信息，返回空容器
     if (!hasExamples && !hasSynonyms && !hasPhrases && !hasRelated) {
       return const SizedBox.shrink();
     }
 
-    // 构建 Tab 列表
     final tabs = <Tab>[];
     final tabViews = <Widget>[];
 
@@ -435,7 +480,7 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen>
         title: '例句',
         color: const Color(0xFF5856D6),
         items: word.examples,
-        highlightWord: word.term, // 加粗当前单词
+        highlightWord: word.term,
       ));
     }
 
@@ -506,14 +551,13 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen>
     );
   }
 
-  /// 构建详情卡片的单个区块
   Widget _buildDetailSection(
     BuildContext context, {
     required IconData icon,
     required String title,
     required Color color,
     required List<String> items,
-    String? highlightWord, // 用于在例句中加粗当前单词
+    String? highlightWord,
   }) {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
@@ -551,41 +595,57 @@ class _PracticeScreenState extends ConsumerState<PracticeScreen>
     );
   }
 
-  /// 构建带高亮的文本（例句中加粗当前单词）
   Widget _buildHighlightedText(BuildContext context, String text, String highlightWord) {
-    // 例句格式："英文\n中文"，只处理英文部分
     final lines = text.split('\n');
     final englishLine = lines.first;
     final chineseLine = lines.length > 1 ? lines.sublist(1).join('\n') : '';
 
-    // 不区分大小写匹配单词
-    final pattern = RegExp('(${RegExp.escape(highlightWord)})', caseSensitive: false);
-    final parts = englishLine.split(pattern);
+    final escapedWord = RegExp.escape(highlightWord);
+    final pattern = RegExp('\\b(${escapedWord}s?|${escapedWord}ed|${escapedWord}ing)\\b', caseSensitive: false);
+
+    final matches = pattern.allMatches(englishLine).toList();
+    if (matches.isEmpty) {
+      return RichText(
+        text: TextSpan(
+          style: Theme.of(context).textTheme.bodyMedium?.copyWith(height: 1.5),
+          children: [
+            TextSpan(text: englishLine),
+            if (chineseLine.isNotEmpty) ...[
+              const TextSpan(text: '\n'),
+              TextSpan(text: chineseLine, style: TextStyle(color: Colors.grey[600])),
+            ],
+          ],
+        ),
+      );
+    }
+
+    final children = <TextSpan>[];
+    int lastEnd = 0;
+
+    for (final match in matches) {
+      if (match.start > lastEnd) {
+        children.add(TextSpan(text: englishLine.substring(lastEnd, match.start)));
+      }
+      children.add(TextSpan(
+        text: match.group(0),
+        style: const TextStyle(fontWeight: FontWeight.w700, color: Color(0xFF007AFF)),
+      ));
+      lastEnd = match.end;
+    }
+
+    if (lastEnd < englishLine.length) {
+      children.add(TextSpan(text: englishLine.substring(lastEnd)));
+    }
+
+    if (chineseLine.isNotEmpty) {
+      children.add(const TextSpan(text: '\n'));
+      children.add(TextSpan(text: chineseLine, style: TextStyle(color: Colors.grey[600])));
+    }
 
     return RichText(
       text: TextSpan(
         style: Theme.of(context).textTheme.bodyMedium?.copyWith(height: 1.5),
-        children: [
-          // 英文部分（带加粗）
-          ...parts.asMap().entries.map((entry) {
-            final index = entry.key;
-            final part = entry.value;
-            return TextSpan(
-              text: part,
-              style: index % 2 == 1 // 奇数索引是匹配的单词
-                  ? const TextStyle(fontWeight: FontWeight.w700, color: Colors.black)
-                  : null,
-            );
-          }),
-          // 中文部分
-          if (chineseLine.isNotEmpty) ...[
-            const TextSpan(text: '\n'),
-            TextSpan(
-              text: chineseLine,
-              style: TextStyle(color: Colors.grey[600]),
-            ),
-          ],
-        ],
+        children: children,
       ),
     );
   }
@@ -623,25 +683,20 @@ Widget _buildIconBtn(BuildContext context, {
   required VoidCallback? onTap,
   bool filled = false,
 }) {
-  final Color primary = const Color(0xFF007AFF);
-  final disabled = onTap == null;
-  return InkWell(
-    borderRadius: BorderRadius.circular(8),
+  final Color primaryColor = const Color(0xFF007AFF);
+  return GestureDetector(
     onTap: onTap,
     child: Container(
-      padding: const EdgeInsets.all(8),
+      width: 40,
+      height: 40,
       decoration: BoxDecoration(
-        color: disabled
-            ? const Color(0xFFE5E5EA)
-            : (filled ? primary : const Color(0xFFF2F2F7)),
-        borderRadius: BorderRadius.circular(8),
+        color: filled ? primaryColor : const Color(0xFFF2F2F7),
+        borderRadius: BorderRadius.circular(10),
       ),
       child: Icon(
         icon,
         size: 20,
-        color: disabled
-            ? const Color(0xFF8E8E93)
-            : (filled ? Colors.white : primary),
+        color: filled ? Colors.white : primaryColor,
       ),
     ),
   );
